@@ -1,0 +1,132 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Role checks
+    function isAdmin() {
+      return isSignedIn() && (
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+        request.auth.token.email == 'samarasooriya2007@gmail.com'
+      );
+    }
+
+    function isStudent() {
+       return isSignedIn() && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'student';
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function hasEnrollment(courseId) {
+      return isSignedIn() && exists(/databases/$(database)/documents/enrollments/$(request.auth.uid + '_' + courseId));
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt']) &&
+             data.keys().size() == 5 &&
+             data.uid == request.auth.uid &&
+             data.email is string &&
+             data.displayName is string &&
+             data.role in ['admin', 'student'] &&
+             data.createdAt == request.time;
+    }
+
+    function isValidCourse(data) {
+      return data.keys().hasAll(['title', 'description', 'thumbnailUrl', 'instructorId', 'createdAt']) &&
+             data.keys().size() == 5 &&
+             data.title is string && data.title.size() <= 200 &&
+             data.description is string && data.description.size() <= 2000 &&
+             data.thumbnailUrl is string &&
+             data.instructorId == request.auth.uid &&
+             data.createdAt == request.time;
+    }
+
+    function isValidVideo(data) {
+      return data.keys().hasAll(['courseId', 'title', 'youtubeVideoId', 'order', 'createdAt']) &&
+             data.keys().size() == 5 &&
+             data.courseId is string &&
+             data.title is string && data.title.size() <= 200 &&
+             data.youtubeVideoId is string && data.youtubeVideoId.size() <= 50 &&
+             data.order is number &&
+             data.createdAt == request.time;
+    }
+
+    function isValidEnrollment(data) {
+      return data.keys().hasAll(['userId', 'courseId', 'enrolledAt']) &&
+             data.keys().size() == 3 &&
+             data.userId is string &&
+             data.courseId is string &&
+             data.enrolledAt == request.time;
+    }
+
+    // --- Collections ---
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isOwner(userId) && isValidUser(incoming());
+      allow update: if isSignedIn() && isOwner(userId) &&
+                    incoming().role == existing().role && // Prevent self-promoting to admin
+                    incoming().uid == existing().uid &&
+                    incoming().createdAt == existing().createdAt &&
+                    isValidUser(incoming()) &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email']);
+    }
+
+    match /courses/{courseId} {
+      allow get: if isSignedIn();
+      allow list: if isSignedIn();
+      allow create: if isAdmin() && isValidCourse(incoming());
+      allow update: if isAdmin() && isValidCourse(incoming()) &&
+                    incoming().instructorId == existing().instructorId &&
+                    incoming().createdAt == existing().createdAt &&
+                    incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'thumbnailUrl']);
+      allow delete: if isAdmin();
+
+      match /videos/{videoId} {
+        allow get: if isSignedIn() && (isAdmin() || hasEnrollment(courseId));
+        allow list: if isSignedIn() && (isAdmin() || hasEnrollment(courseId));
+        allow create: if isAdmin() && isValidVideo(incoming());
+        allow update: if isAdmin() && isValidVideo(incoming()) &&
+                      incoming().createdAt == existing().createdAt &&
+                      incoming().diff(existing()).affectedKeys().hasOnly(['title', 'youtubeVideoId', 'order']);
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /enrollments/{enrollmentId} {
+      allow get: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow list: if isSignedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isAdmin() && isValidEnrollment(incoming());
+      allow delete: if isAdmin();
+    }
+  }
+}
